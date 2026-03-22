@@ -3,6 +3,11 @@
 Мультиагентная система для полного цикла подготовки данных и обучения модели на текстовых данных.
 Реализована как набор Python-агентов + Claude Code Skills.
 
+## Видео отчет по пайплайну (пример работы end-to-end (30 минут контента))
+```
+https://drive.google.com/file/d/1wN0CkJOskyJPeFTbzFnu2JkszcAjTYkW/view?usp=sharing
+```
+
 ## Быстрый старт
 
 ```bash
