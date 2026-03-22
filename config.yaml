@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────
+# DataCollectionAgent — default configuration
+# ──────────────────────────────────────────────
+
+# Task definition — used by ALL agents in the pipeline
+task:
+  type: ""  # Set automatically by run_data_pipeline.py or /data-pipeline
+  allow_new_labels: true   # LLM can propose new label values when highly confident
+  # Set by dataset-collector on first run.
+  # Used by data-detective, label-master, active-learning to understand the goal.
+
+# General settings
+general:
+  output_dir: data/raw
+  eda_dir: data/eda
+  unified_file: data/raw/combined.parquet
+  max_samples_per_source: 5000        # limit per single source
+  validation_sample_size: 10          # rows to fetch during source validation
+
+# HuggingFace Hub search
+huggingface:
+  enabled: true
+  max_results: 15                     # per query, agent runs multiple queries
+
+# Kaggle search (requires KAGGLE_USERNAME + KAGGLE_KEY in .env)
+kaggle:
+  enabled: true
+  max_results: 15
+
+# Web scraping defaults
+scraping:
+  enabled: true
+  timeout: 30                         # request timeout in seconds
+  user_agent: "Mozilla/5.0 (compatible; DataCollectionAgent/1.0)"
+  max_pages: 5                        # max pages to scrape per source
+
+# RSS / Atom feeds
+rss:
+  enabled: true
+  max_entries: 500
+
+# Unified schema — every source is mapped to these columns
+schema:
+  columns:
+    - text
+    - label
+    - source
+    - collected_at

@@ -1,0 +1,14 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Generated data (created by pipeline)
+data/
+models/
+notebooks/
+PIPELINE_REPORT.md
+
+# Claude Code local settings
+.claude/settings.local.json
