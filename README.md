@@ -53,87 +53,163 @@ combined.parquet    cleaned.parquet     labeled.parquet     REPORT.md           
 
 Сбор данных из нескольких источников с унификацией в единую схему.
 
-| Метод | Описание |
-|-------|----------|
-| `search_sources(query)` | Поиск датасетов на HuggingFace и Kaggle |
-| `validate_source(source)` | Проверка доступности источника |
-| `load_dataset(name, source)` | Загрузка с HF / Kaggle |
-| `scrape(url, selector)` | Скрапинг веб-страницы |
-| `fetch_api(endpoint)` | Запрос к JSON API |
-| `fetch_rss(url)` | Парсинг RSS/Atom |
-| `merge(sources)` | Объединение в единый DataFrame |
-| `run(sources)` | Полный цикл: collect → merge → save |
+```python
+agent = DataCollectionAgent(config="config.yaml")
+```
 
-**Схема данных** — все источники приводятся к единому формату:
+**5 типов источников:**
+
+| Тип | Метод | Пример |
+|-----|-------|--------|
+| HuggingFace | `load_dataset(name, source="hf")` | `fancyzhx/ag_news` |
+| Kaggle | `load_dataset(name, source="kaggle")` | `amananandrai/ag-news-classification-dataset` |
+| Web scraping | `scrape(url, selector)` | Любая HTML-страница + CSS-селектор |
+| REST API | `fetch_api(endpoint, params)` | Guardian API, NewsAPI и др. |
+| RSS/Atom | `fetch_rss(url)` | BBC News, Reddit и др. |
+
+Агент автоматически ищет подходящие датасеты через `search_sources(query)`, валидирует их доступность через `validate_source()`, и объединяет в единый DataFrame.
+
+Все источники приводятся к **единой схеме**:
 
 | Колонка | Тип | Описание |
 |---------|-----|----------|
 | `text` | str | Текст |
-| `label` | str | Метка класса (может быть пустой) |
-| `source` | str | Идентификатор источника |
+| `label` | str | Метка класса (может быть пустой — разметка на шаге 3) |
+| `source` | str | Идентификатор источника (например `huggingface:fancyzhx/ag_news`) |
 | `collected_at` | str | Временная метка ISO 8601 |
+
+Настройки в `config.yaml`: лимиты на источник (`max_samples_per_source: 5000`), таймауты, включение/отключение типов источников.
 
 ### 2. DataQualityAgent
 
 Обнаружение и устранение проблем качества данных.
 
-| Метод | Описание |
-|-------|----------|
-| `detect_issues(df)` | Поиск: пропуски, дубликаты, выбросы, дисбаланс, пустые тексты |
-| `fix(df, strategy)` | Применение стратегии чистки |
-| `compare(before, after)` | Сравнение метрик до/после |
-| `list_strategies()` | Доступные пресеты |
+```python
+agent = DataQualityAgent(text_column="text", label_column="label")
+```
 
-**Стратегии чистки:**
+**Обнаруживает 5 типов проблем:**
+- **Пропущенные значения** — nulls по каждой колонке
+- **Дубликаты** — одинаковые тексты
+- **Выбросы** — аномальная длина текста (метод IQR: q1 − 1.5·IQR ... q3 + 1.5·IQR)
+- **Дисбаланс классов** — отношение крупнейшего к мельчайшему классу (порог > 3.0)
+- **Пустые тексты** — пустые строки или только пробелы
+
+**3 готовые стратегии чистки** (`fix(df, strategy)`):
 
 | Стратегия | Пропуски | Дубликаты | Выбросы | Пустые |
 |-----------|----------|-----------|---------|--------|
-| aggressive | Удалить | Удалить | Удалить (IQR) | Удалить |
-| balanced | Заполнить | Удалить | Удалить (z>3) | Удалить |
-| conservative | Заполнить | Оставить | Оставить | Оставить |
+| `aggressive` | Удалить строки | Удалить | Удалить (IQR) | Удалить |
+| `balanced` | Заполнить пустой строкой | Удалить | Удалить (z-score > 3) | Удалить |
+| `conservative` | Заполнить пустой строкой | Оставить | Оставить | Оставить |
+
+Можно передать свою стратегию как dict:
+```python
+agent.fix(df, strategy={"missing": "drop", "duplicates": "drop", "outliers": "keep", "empty_texts": "drop"})
+```
+
+`compare(df_before, df_after)` — сравнивает метрики до и после чистки: количество строк, пропуски, дубликаты, выбросы, дисбаланс.
 
 ### 3. AnnotationAgent
 
-Автоматическая разметка через Claude API + экспорт спорных примеров в Label Studio.
+Автоматическая разметка текстов через Claude API с контролем качества и интеграцией с Label Studio.
 
-| Метод | Описание |
-|-------|----------|
-| `auto_label(df, labels)` | Zero-shot классификация через Claude API |
-| `generate_spec(df, task, labels)` | Генерация спецификации разметки |
-| `check_quality(df)` | Cohen's κ, confidence, распределение |
-| `export_to_labelstudio(df)` | Экспорт спорных примеров в Label Studio |
-| `import_from_labelstudio(df)` | Импорт исправлений из Label Studio |
+```python
+agent = AnnotationAgent(text_column="text", label_column="label", model="claude-sonnet-4-20250514")
+```
 
-Добавляет колонки: `auto_label`, `confidence`, `is_disputed`.
+**Авторазметка** (`auto_label`) — отправляет тексты в Claude API батчами (по 10), каждый текст обрезается до 500 символов. LLM возвращает метку + confidence (0.0–1.0). Добавляет 3 колонки:
+
+| Колонка | Описание |
+|---------|----------|
+| `auto_label` | Присвоенная метка |
+| `confidence` | Уверенность модели (0.0–1.0) |
+| `is_disputed` | `True` если confidence < порога (по умолчанию 0.7) |
+
+**4 варианта использования:**
+1. **Разметить всё с нуля** — передать список меток, LLM классифицирует каждый текст
+2. **Разметить только неразмеченные** — через `label_unlabeled.py`, существующие метки сохраняются
+3. **Разрешить новые метки** — `allow_new_labels=True`, LLM может предложить новые классы (при confidence > 0.9)
+4. **Ручная разметка спорных** — экспорт в Label Studio, правка, импорт обратно
+
+**Контроль качества** (`check_quality`):
+- Cohen's κ — согласованность с исходными метками (если есть)
+- Распределение confidence (mean, median, std)
+- Количество и процент спорных примеров (low confidence)
+- Распределение меток по классам
+
+**Интеграция с Label Studio:**
+- `export_to_labelstudio(df)` — экспорт спорных примеров в JSON (с предзаполненными predictions)
+- `generate_ls_config(labels)` — генерация XML-конфига проекта
+- `start_ls.py` — запуск Label Studio (находит executable на Windows/Linux)
+- `import_from_labelstudio(df)` — импорт ручных исправлений обратно (confidence устанавливается в 1.0)
 
 ### 4. ActiveLearningAgent
 
-Эксперимент по сравнению стратегий выборки для active learning.
+Эксперимент: сколько размеченных примеров реально нужно для обучения? Сравнивает стратегии умного отбора данных.
 
-| Метод | Описание |
-|-------|----------|
-| `select_model(df, task_type)` | LLM выбирает модель и seed size |
-| `fit(labeled_df)` | Обучение TF-IDF + модель |
-| `query(pool_df, strategy)` | Выбор самых информативных примеров |
-| `evaluate(test_df)` | Оценка accuracy + F1 |
-| `compare_strategies(df)` | Сравнение entropy / margin / random |
-| `report(results)` | Генерация отчёта + learning curve |
+```python
+agent = ActiveLearningAgent(model="logreg", text_col="text", label_col="auto_label")
+```
 
-**Стратегии:** entropy (H(p)), margin (разница top-2), random (baseline).
+**LLM выбирает модель и параметры** — `select_model()` отправляет в Claude API статистику датасета (размер, количество классов, дисбаланс, средняя длина текста) и получает рекомендацию.
 
-**Модели:** LogReg, LogReg balanced, SVM (calibrated), Multinomial NB.
+**4 доступные модели (TF-IDF + sklearn):**
+
+| Ключ | Модель | Когда подходит |
+|------|--------|----------------|
+| `logreg` | Logistic Regression | Хороший default для текстов |
+| `logreg_balanced` | LogReg с `class_weight='balanced'` | Несбалансированные классы |
+| `svm` | Linear SVM + Platt scaling | Высокоразмерные данные |
+| `nb` | Multinomial Naive Bayes | Маленькие датасеты |
+
+**3 стратегии выборки** (`query(pool_df, strategy)`):
+
+| Стратегия | Формула | Идея |
+|-----------|---------|------|
+| `entropy` | H(p) = −Σ pᵢ log pᵢ | Берём примеры с максимальной неопределённостью |
+| `margin` | p₁ − p₂ (разница top-2) | Берём примеры где модель колеблется между двумя классами |
+| `random` | Случайная выборка | Baseline для сравнения |
+
+**Цикл эксперимента** (`compare_strategies`):
+1. Фиксированный split: seed (начальная выборка) + pool (нетронутые) + test (20%)
+2. Для каждой стратегии: обучение на seed → query самых полезных из pool → добавление → повторение
+3. На каждой итерации — свежая модель (не дообучение), оценка accuracy + F1 macro
+4. Результат — learning curves для сравнения стратегий
+
+**Генерирует:** `learning_curve.png`, `REPORT.md` с анализом экономии (на сколько % entropy лучше random), `history_*.json` с полной историей.
 
 ### 5. ModelTrainerAgent
 
-Обучение финальной модели на всех данных.
+Обучение финальной модели на всех размеченных данных. LLM сама выбирает оптимальную модель.
 
-| Метод | Описание |
-|-------|----------|
-| `select_model(df, al_dir)` | LLM выбирает модель по результатам AL |
-| `train(train_df, model_key)` | TF-IDF (15K features) + модель |
-| `evaluate(test_df)` | Метрики + confusion matrix + per-class F1 |
-| `save_model(model_dir)` | Сохранение в joblib + config |
-| `run(parquet_path)` | Полный цикл: select → train → evaluate → save |
+```python
+agent = ModelTrainerAgent(text_col="text", label_col="auto_label")
+```
+
+**LLM выбирает модель** — `select_model()` читает результаты AL-эксперимента (какая стратегия/модель победила), статистику данных, и просит Claude API рекомендовать модель для финального обучения. Это не обязательно та же модель что в AL — LLM может выбрать другую исходя из полных данных.
+
+**Те же 4 модели** что и у AL: `logreg`, `logreg_balanced`, `svm`, `nb` — все поверх TF-IDF (15 000 features, uni+bigrams).
+
+**Полный цикл** (`run()`):
+1. LLM анализирует данные + результаты AL → выбирает модель
+2. Stratified train/test split (80/20)
+3. Обучение TF-IDF + выбранная модель
+4. Оценка на тесте: accuracy, F1 macro/weighted, precision, recall
+5. Визуализации: confusion matrix, per-class F1 bar chart
+6. Сохранение модели в `models/final_model.pkl` (joblib) + `model_config.json`
+7. Генерация `MODEL_REPORT.md` с обоснованием выбора и метриками
+
+**Метрики по классам** — для каждого класса отдельно: precision, recall, F1, support.
+
+```python
+# Использование обученной модели
+import joblib
+bundle = joblib.load("models/final_model.pkl")
+vectorizer = bundle["vectorizer"]
+model = bundle["model"]
+prediction = model.predict(vectorizer.transform(["Breaking news: stocks plummet"]))
+```
 
 ---
 
