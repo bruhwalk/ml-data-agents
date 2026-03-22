@@ -80,26 +80,34 @@ def run_step1_collection(task_description: str) -> pd.DataFrame:
     valid_sources = []
     for s in sources:
         try:
-            ok = agent.validate_source(s)
-            status = "OK" if ok else "FAIL"
+            result = agent.validate_source(s)
+            ok = result["ok"]
+            estimated = result.get("estimated_size", 0)
+            reason = result.get("reason", "")
             if ok:
+                s["estimated_size"] = estimated
                 valid_sources.append(s)
+                status = f"OK ~{estimated} rows"
+            else:
+                status = f"SKIP ({reason})"
         except Exception as e:
             status = f"ERROR: {e}"
         name = s.get("name", s.get("source", "?"))
         print(f"  [{status}] {name}")
 
     if not valid_sources:
-        print("  No valid sources found.")
+        print("  No valid sources found (min 500 records per source).")
         sys.exit(1)
 
-    # Show validated sources
+    # Show validated sources with relevance
     print()
     print("Validated sources:")
     for i, s in enumerate(valid_sources, 1):
-        name = s.get("name", s.get("source", "?"))
+        display = s.get("display_name", s.get("name", s.get("source", "?")))
         src_type = s.get("type", "?")
-        print(f"  {i}. [{src_type}] {name}")
+        relevance = s.get("relevance", "?")
+        estimated = s.get("estimated_size", "?")
+        print(f"  {i}. [{src_type}] {display}  (relevance: {relevance}/5, ~{estimated} rows)")
 
     # ⏸ CHECKPOINT: let user pick sources
     print()

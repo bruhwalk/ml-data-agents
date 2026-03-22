@@ -224,22 +224,152 @@ class DataCollectionAgent:
 
     # ── High-level API ──────────────────────────────────────────────
 
+    # ── Known API / RSS / scraping sources ──────────────────────
+    # Each entry has keywords for matching + source descriptor.
+    KNOWN_SOURCES: list[dict[str, Any]] = [
+        {
+            "keywords": ["news", "новост", "classification", "topic", "классификац", "тем"],
+            "source": {
+                "name": "Guardian API (news)",
+                "type": "api",
+                "endpoint": "https://content.guardianapis.com/search",
+                "params": {"api-key": "test", "page-size": "50", "pages": "20"},
+                "text_field": "webTitle",
+                "label_field": "sectionName",
+                "results_key": "response.results",
+                "relevance": 4,
+                "estimated_size": 1000,
+            },
+        },
+        {
+            "keywords": ["news", "новост", "rss", "feed"],
+            "source": {
+                "name": "BBC News RSS",
+                "type": "rss",
+                "url": "http://feeds.bbci.co.uk/news/rss.xml",
+                "relevance": 3,
+                "estimated_size": 50,
+            },
+        },
+        {
+            "keywords": ["news", "новост", "rss", "feed"],
+            "source": {
+                "name": "Reuters RSS",
+                "type": "rss",
+                "url": "https://feeds.reuters.com/reuters/topNews",
+                "relevance": 3,
+                "estimated_size": 50,
+            },
+        },
+        {
+            "keywords": ["sentiment", "review", "отзыв", "тональност", "opinion"],
+            "source": {
+                "name": "imdb",
+                "display_name": "IMDB Reviews (HF)",
+                "type": "hf_dataset",
+                "split": "train",
+                "text_field": "text",
+                "label_field": "label",
+                "relevance": 5,
+                "estimated_size": 25000,
+            },
+        },
+        {
+            "keywords": ["spam", "email", "sms", "спам", "письм"],
+            "source": {
+                "name": "sms_spam",
+                "display_name": "SMS Spam Collection (HF)",
+                "type": "hf_dataset",
+                "split": "train",
+                "text_field": "sms",
+                "label_field": "label",
+                "relevance": 5,
+                "estimated_size": 5574,
+            },
+        },
+    ]
+
+    MIN_RECORDS = 500  # Minimum records per source
+
+    DATASET_TYPES = {"hf_dataset", "kaggle_dataset"}
+    API_TYPES = {"api", "scrape"}
+
     def search_sources(self, query: str) -> list[dict[str, Any]]:
-        """Search for datasets across all enabled backends."""
+        """Search for datasets across all enabled backends + known API sources.
+
+        Guarantees at least 1 dataset source (HF/Kaggle) and at least 1
+        API/scraping source in the results.  RSS sources are included
+        when matched but not required.
+        """
         results: list[dict] = []
         if self.cfg.huggingface.enabled:
             results.extend(self._search_hf(query))
         if self.cfg.kaggle.available:
             results.extend(self._search_kaggle(query))
+        # Add matching known sources (API, RSS, curated HF, etc.)
+        results.extend(self._search_known(query))
+
+        # --- Enforce: at least 1 dataset + at least 1 API/scrape ---
+        has_dataset = any(r.get("type") in self.DATASET_TYPES for r in results)
+        has_api = any(r.get("type") in self.API_TYPES for r in results)
+
+        if not has_api:
+            # Add all known API/scrape sources (even if keywords don't match)
+            api_sources = [
+                dict(e["source"]) for e in self.KNOWN_SOURCES
+                if e["source"]["type"] in self.API_TYPES
+            ]
+            if api_sources:
+                for s in api_sources:
+                    s.setdefault("relevance", 2)  # lower relevance — forced match
+                results.extend(api_sources)
+
+        if not has_dataset:
+            # Add all known dataset sources
+            ds_sources = [
+                dict(e["source"]) for e in self.KNOWN_SOURCES
+                if e["source"]["type"] in self.DATASET_TYPES
+            ]
+            if ds_sources:
+                for s in ds_sources:
+                    s.setdefault("relevance", 2)
+                results.extend(ds_sources)
+
         return results
 
-    def validate_source(self, source: dict[str, Any]) -> bool:
-        """Try to fetch a small sample. Return True on success."""
+    def validate_source(self, source: dict[str, Any]) -> dict[str, Any]:
+        """Try to fetch a small sample. Return validation result dict.
+
+        Returns dict with keys: ok (bool), estimated_size (int), reason (str).
+        """
         try:
+            # Use estimated_size from known sources if available
+            estimated = source.get("estimated_size", 0)
+
             df = self._collect_one(source, limit=self.cfg.general.validation_sample_size)
-            return df is not None and len(df) > 0
-        except Exception:
-            return False
+            if df is None or len(df) == 0:
+                return {"ok": False, "estimated_size": 0, "reason": "no data returned"}
+
+            # For HF/Kaggle we can estimate full size
+            if estimated == 0 and source.get("type") in ("hf_dataset", "kaggle_dataset"):
+                try:
+                    df_full = self._collect_one(source, limit=None)
+                    estimated = len(df_full) if df_full is not None else 0
+                except Exception:
+                    estimated = len(df)  # fallback to sample size
+            elif estimated == 0:
+                estimated = len(df)
+
+            if estimated < self.MIN_RECORDS:
+                return {
+                    "ok": False,
+                    "estimated_size": estimated,
+                    "reason": f"too few records ({estimated} < {self.MIN_RECORDS})",
+                }
+
+            return {"ok": True, "estimated_size": estimated, "reason": "ok"}
+        except Exception as e:
+            return {"ok": False, "estimated_size": 0, "reason": str(e)}
 
     def collect(self, sources: list[dict[str, Any]]) -> pd.DataFrame:
         """Collect data from selected sources and return merged DataFrame."""
@@ -332,6 +462,16 @@ class DataCollectionAgent:
             return self.fetch_rss(url=src["url"], label=src.get("label"))
         else:
             raise ValueError(f"Unknown source type: {src_type}")
+
+    def _search_known(self, query: str) -> list[dict]:
+        """Match query against known API/RSS/scraping sources."""
+        query_lower = query.lower()
+        matched = []
+        for entry in self.KNOWN_SOURCES:
+            keywords = entry["keywords"]
+            if any(kw in query_lower for kw in keywords):
+                matched.append(dict(entry["source"]))
+        return matched
 
     def _search_hf(self, query: str) -> list[dict]:
         script = SCRIPTS_DIR / "search_hf.py"

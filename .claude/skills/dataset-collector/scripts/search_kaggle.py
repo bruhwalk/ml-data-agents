@@ -23,12 +23,24 @@ def search(query: str, max_results: int = 10) -> list[dict]:
 
     results = []
     for ds in datasets[:max_results]:
+        downloads = ds.download_count or 0
+
+        # Relevance score 1-5
+        score = 2  # Kaggle datasets are usually relevant if found
+        if downloads >= 1000:
+            score += 1
+        if downloads >= 10000:
+            score += 1
+        if query.lower().split()[0] in (ds.title or "").lower():
+            score = min(score + 1, 5)
+
         results.append({
             "name": ds.ref,
             "type": "kaggle_dataset",
             "description": (ds.title or "")[:200],
             "size_bytes": ds.total_bytes,
-            "downloads": ds.download_count,
+            "downloads": downloads,
+            "relevance": min(score, 5),
         })
 
     return results
